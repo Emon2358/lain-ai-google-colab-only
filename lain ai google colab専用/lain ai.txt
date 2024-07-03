@@ -1,0 +1,98 @@
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPT2Config
+import os
+import re
+import time
+
+original_model_name = "rinna/japanese-gpt2-medium"
+model_path = "/content/results"
+
+if not os.path.exists(model_path):
+    raise ValueError(f"指定されたパス {model_path} が見つかりません。")
+
+tokenizer = AutoTokenizer.from_pretrained(original_model_name)
+config = GPT2Config.from_pretrained(model_path)
+
+try:
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        config=config,
+        torch_dtype=torch.float32,
+        trust_remote_code=True
+    )
+except Exception as e:
+    print(f"モデルの読み込み中にエラーが発生しました: {e}")
+    raise
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+def generate_response(prompt, max_length=100, timeout=10):
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    
+    start_time = time.time()
+    try:
+        output = model.generate(
+            input_ids,
+            max_length=input_ids.shape[1] + max_length,
+            num_return_sequences=1,
+            no_repeat_ngram_size=2,
+            top_k=50,
+            top_p=0.92,
+            temperature=0.7,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=tokenizer.eos_token_id,
+            output_scores=True,
+            return_dict_in_generate=True,
+        )
+        
+        if time.time() - start_time > timeout:
+            return "申し訳ありません。応答の生成に時間がかかりすぎました。"
+        
+        response = tokenizer.decode(output.sequences[0], skip_special_tokens=True)
+        return response[len(prompt):].strip()
+    except Exception as e:
+        print(f"応答生成中にエラーが発生しました: {e}")
+        return "申し訳ありません。応答の生成中にエラーが発生しました。"
+
+def clean_response(response):
+    response = re.sub(r'<.*?>', '', response)
+    response = re.sub(r'Human:|AI:', '', response)
+    response = re.sub(r'[。、．，]{2,}', lambda m: m.group()[0], response)
+    sentences = response.split('。')
+    if len(sentences) > 1:
+        return '。'.join(sentences[:-1]) + '。'
+    return response
+
+def is_name_question(text):
+    return '名前' in text or 'なまえ' in text
+
+def get_ai_name():
+    return "アシスタント"
+
+print("モデルの準備ができました。質問を入力してください。終了するには 'quit' と入力してください。")
+conversation_history = ""
+while True:
+    user_input = input("あなた: ")
+    if user_input.lower() == 'quit':
+        break
+    
+    if is_name_question(user_input):
+        ai_response = f"私の名前は{get_ai_name()}です。どのようなことでお手伝いできますか？"
+    else:
+        prompt = f"{conversation_history}<Human>: {user_input}\n<AI>:"
+        ai_response = generate_response(prompt)
+        if ai_response:
+            ai_response = clean_response(ai_response)
+        else:
+            ai_response = "申し訳ありません。適切な応答を生成できませんでした。"
+    
+    print("AI:", ai_response)
+    
+    conversation_history += f"<Human>: {user_input}\n<AI>: {ai_response}\n"
+    
+    if len(conversation_history.split()) > 200:
+        conversation_history = "\n".join(conversation_history.split("\n")[-10:])
+
+print("対話を終了しました。")
